@@ -26,10 +26,16 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLabel, QSlider, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QFrame, QStatusBar, QAction, QMenuBar, QToolBar,
-    QButtonGroup, QScrollArea, QSplitter, QTabWidget, QGroupBox
+    QButtonGroup, QScrollArea, QSplitter, QTabWidget, QGroupBox, QCheckBox
 )
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QIcon, QFont, QPixmap as QPixmapIcon, QTransform
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal, QRectF, QTimer, QSize
+
+# Additional imports for histogram
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 # --- Icon Creation Helper ---
 def create_icon(icon_type, size=16, color="#E0E0E0"):
@@ -161,6 +167,66 @@ class StatusIndicator(QLabel):
                 font-weight: 500;
             }}
         """)
+
+
+class HistogramWidget(FigureCanvas):
+    """A widget for displaying image histograms."""
+    def __init__(self, parent=None):
+        self.figure = Figure(figsize=(4, 3), dpi=80)
+        super().__init__(self.figure)
+        self.setParent(parent)
+        
+        # Configure the figure
+        self.figure.patch.set_facecolor('none')
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_facecolor('#2E2E2E')
+        self.ax.tick_params(colors='#E0E0E0', labelsize=8)
+        
+        # Style the axes
+        for spine in self.ax.spines.values():
+            spine.set_color('#555555')
+        
+        self.figure.tight_layout()
+        
+    def update_histogram(self, image_data, level=None, width=None):
+        """Update the histogram with new image data."""
+        self.ax.clear()
+        
+        # Calculate histogram
+        hist, bins = np.histogram(image_data.flatten(), bins=256, density=True)
+        
+        # Plot histogram
+        self.ax.plot(bins[:-1], hist, color='#4A9EFF', linewidth=1.5)
+        self.ax.fill_between(bins[:-1], hist, alpha=0.3, color='#4A9EFF')
+        
+        # Add window/level indicators if provided
+        if level is not None and width is not None:
+            min_val = level - width / 2
+            max_val = level + width / 2
+            
+            # Draw window bounds
+            self.ax.axvline(min_val, color='#FF6B6B', linestyle='--', alpha=0.8, linewidth=1)
+            self.ax.axvline(max_val, color='#FF6B6B', linestyle='--', alpha=0.8, linewidth=1)
+            self.ax.axvline(level, color='#FFE66D', linestyle='-', alpha=0.9, linewidth=1.5)
+            
+            # Highlight window region
+            y_max = np.max(hist)
+            self.ax.fill_betweenx([0, y_max], min_val, max_val, alpha=0.1, color='#FFE66D')
+        
+        # Style the plot
+        self.ax.set_xlabel('Pixel Value', color='#E0E0E0', fontsize=9)
+        self.ax.set_ylabel('Density', color='#E0E0E0', fontsize=9)
+        self.ax.set_title('Pixel Value Histogram', color='#FFFFFF', fontsize=10, fontweight='bold')
+        
+        # Style axes
+        self.ax.set_facecolor('#2E2E2E')
+        self.ax.tick_params(colors='#E0E0E0', labelsize=8)
+        for spine in self.ax.spines.values():
+            spine.set_color('#555555')
+            
+        self.ax.grid(True, alpha=0.2, color='#555555')
+        self.figure.tight_layout()
+        self.draw()
 
 
 # --- Constants ---
@@ -662,8 +728,15 @@ class DicomViewer(QMainWindow):
         tools_row2.addWidget(self.btn_measure)
         tools_row2.addWidget(self.btn_theme)
         
+        # Histogram toggle
+        self.histogram_checkbox = QCheckBox("Show Histogram")
+        self.histogram_checkbox.setToolTip("Show/hide pixel value histogram")
+        self.histogram_checkbox.clicked.connect(self.toggle_histogram)
+        self.histogram_checkbox.setEnabled(False)
+        
         tools_layout.addLayout(tools_row1)
         tools_layout.addLayout(tools_row2)
+        tools_layout.addWidget(self.histogram_checkbox)
         controls_layout.addWidget(tools_group)
 
         # Patient Information Group
@@ -688,14 +761,34 @@ class DicomViewer(QMainWindow):
         image_layout = QVBoxLayout(image_widget)
         image_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Create a splitter for image and histogram
+        self.image_splitter = QSplitter(Qt.Vertical)
+        
         # Image display area
+        image_container = QWidget()
+        container_layout = QVBoxLayout(image_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.scene = QGraphicsScene()
         self.view = DicomGraphicsView(self.scene)
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene.addItem(self.pixmap_item)
         self.view.windowLevelChanged.connect(self.handle_mouse_wl_adjust)
         
-        image_layout.addWidget(self.view)
+        container_layout.addWidget(self.view)
+        self.image_splitter.addWidget(image_container)
+        
+        # Histogram widget (initially hidden)
+        self.histogram_widget = HistogramWidget()
+        self.histogram_widget.setMinimumHeight(200)
+        self.histogram_widget.setMaximumHeight(300)
+        self.histogram_widget.hide()
+        self.image_splitter.addWidget(self.histogram_widget)
+        
+        # Set splitter proportions (image takes most space)
+        self.image_splitter.setSizes([700, 200])
+        
+        image_layout.addWidget(self.image_splitter)
         return image_widget
 
     def init_status_bar(self):
@@ -926,6 +1019,21 @@ class DicomViewer(QMainWindow):
     def toggle_measure_mode(self):
         """Toggle measurement mode (placeholder for future implementation)."""
         self.status_bar.showMessage("Measurement tool - Coming soon in next update!", 3000)
+
+    def toggle_histogram(self):
+        """Toggle histogram display."""
+        if self.histogram_checkbox.isChecked():
+            self.histogram_widget.show()
+            self.status_bar.showMessage("Histogram display enabled", 2000)
+            # Update histogram with current image
+            if self.slices:
+                current_slice_data = self.slices[self.current_slice_index].pixel_array.astype(np.float32)
+                level = self.level_slider.value()
+                width = self.width_slider.value()
+                self.histogram_widget.update_histogram(current_slice_data, level, width)
+        else:
+            self.histogram_widget.hide()
+            self.status_bar.showMessage("Histogram display disabled", 2000)
 
     def toggle_theme(self):
         """Toggle between dark and light themes."""
@@ -1360,6 +1468,7 @@ class DicomViewer(QMainWindow):
         # Enable tools
         self.btn_export.setEnabled(True)
         self.btn_measure.setEnabled(True)
+        self.histogram_checkbox.setEnabled(True)
 
     def slice_slider_changed(self, value):
         self.current_slice_index = value
@@ -1490,6 +1599,10 @@ Slice Position: {self.current_slice_index + 1} / {len(self.slices)}"""
         # Update window/level labels
         self.level_label.setText(f"Level: {level}")
         self.width_label.setText(f"Width: {width}")
+        
+        # Update histogram if visible
+        if self.histogram_checkbox.isChecked() and self.histogram_widget.isVisible():
+            self.histogram_widget.update_histogram(current_slice_data, level, width)
         
     def resizeEvent(self, event):
         if self.pixmap_item.pixmap():
