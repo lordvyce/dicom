@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QGraphicsPixmapItem, QFrame, QStatusBar, QAction, QMenuBar, QToolBar,
     QButtonGroup, QScrollArea, QSplitter, QTabWidget, QGroupBox
 )
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QIcon, QFont, QPixmap as QPixmapIcon
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QIcon, QFont, QPixmap as QPixmapIcon, QTransform
 from PyQt5.QtCore import Qt, QPoint, pyqtSignal, QRectF, QTimer, QSize
 
 # --- Icon Creation Helper ---
@@ -491,6 +491,17 @@ class DicomViewer(QMainWindow):
         self.current_slice_index = 0
         self.current_theme = "dark"
         self.recent_files = []
+        self.max_recent_files = 10
+        
+        # Image transformation state
+        self.rotation_angle = 0
+        self.flip_horizontal_state = False
+        self.flip_vertical_state = False
+        
+        # Settings file path
+        import os
+        self.settings_file = os.path.expanduser("~/.dicom_viewer_settings.json")
+        self.load_settings()
 
         # Initialize UI
         self.init_ui()
@@ -722,18 +733,27 @@ class DicomViewer(QMainWindow):
         
         open_file_action = QAction('Open File...', self)
         open_file_action.setShortcut('Ctrl+O')
+        open_file_action.setToolTip('Open a single DICOM file')
         open_file_action.triggered.connect(self.open_file)
         file_menu.addAction(open_file_action)
         
         open_folder_action = QAction('Open Folder...', self)
         open_folder_action.setShortcut('Ctrl+Shift+O')
+        open_folder_action.setToolTip('Open a folder containing DICOM series')
         open_folder_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_folder_action)
         
         file_menu.addSeparator()
         
+        # Recent Files submenu
+        self.recent_files_menu = file_menu.addMenu('Recent Files')
+        self.update_recent_files_menu()
+        
+        file_menu.addSeparator()
+        
         export_action = QAction('Export Image...', self)
         export_action.setShortcut('Ctrl+E')
+        export_action.setToolTip('Export current image to file')
         export_action.triggered.connect(self.export_image)
         file_menu.addAction(export_action)
         
@@ -749,20 +769,98 @@ class DicomViewer(QMainWindow):
         
         zoom_fit_action = QAction('Fit to Window', self)
         zoom_fit_action.setShortcut('F')
+        zoom_fit_action.setToolTip('Fit image to window')
         zoom_fit_action.triggered.connect(self.zoom_fit)
         view_menu.addAction(zoom_fit_action)
         
         zoom_100_action = QAction('Actual Size', self)
         zoom_100_action.setShortcut('Ctrl+1')
+        zoom_100_action.setToolTip('Reset zoom to 100%')
         zoom_100_action.triggered.connect(self.zoom_actual)
         view_menu.addAction(zoom_100_action)
+        
+        zoom_in_action = QAction('Zoom In', self)
+        zoom_in_action.setShortcut('Ctrl++')
+        zoom_in_action.setToolTip('Zoom in')
+        zoom_in_action.triggered.connect(self.zoom_in)
+        view_menu.addAction(zoom_in_action)
+        
+        zoom_out_action = QAction('Zoom Out', self)
+        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.setToolTip('Zoom out')
+        zoom_out_action.triggered.connect(self.zoom_out)
+        view_menu.addAction(zoom_out_action)
+        
+        view_menu.addSeparator()
+        
+        # Window/Level presets submenu
+        presets_menu = view_menu.addMenu('Window/Level Presets')
+        for name, values in PRESETS.items():
+            action = QAction(name, self)
+            action.setToolTip(f"Apply {name} window/level preset")
+            action.triggered.connect(lambda checked, v=values: self.apply_preset(v))
+            presets_menu.addAction(action)
         
         view_menu.addSeparator()
         
         theme_action = QAction('Toggle Theme', self)
         theme_action.setShortcut('Ctrl+T')
+        theme_action.setToolTip('Switch between dark and light themes')
         theme_action.triggered.connect(self.toggle_theme)
         view_menu.addAction(theme_action)
+        
+        # Tools menu
+        tools_menu = menubar.addMenu('Tools')
+        
+        measure_action = QAction('Distance Measurement', self)
+        measure_action.setShortcut('M')
+        measure_action.setToolTip('Measure distances in the image')
+        measure_action.triggered.connect(self.toggle_measure_mode)
+        tools_menu.addAction(measure_action)
+        
+        rotate_cw_action = QAction('Rotate Clockwise', self)
+        rotate_cw_action.setShortcut('R')
+        rotate_cw_action.setToolTip('Rotate image 90° clockwise')
+        rotate_cw_action.triggered.connect(self.rotate_clockwise)
+        tools_menu.addAction(rotate_cw_action)
+        
+        rotate_ccw_action = QAction('Rotate Counter-clockwise', self)
+        rotate_ccw_action.setShortcut('Shift+R')
+        rotate_ccw_action.setToolTip('Rotate image 90° counter-clockwise')
+        rotate_ccw_action.triggered.connect(self.rotate_counterclockwise)
+        tools_menu.addAction(rotate_ccw_action)
+        
+        flip_h_action = QAction('Flip Horizontal', self)
+        flip_h_action.setShortcut('H')
+        flip_h_action.setToolTip('Flip image horizontally')
+        flip_h_action.triggered.connect(self.flip_horizontal)
+        tools_menu.addAction(flip_h_action)
+        
+        flip_v_action = QAction('Flip Vertical', self)
+        flip_v_action.setShortcut('V')
+        flip_v_action.setToolTip('Flip image vertically')
+        flip_v_action.triggered.connect(self.flip_vertical)
+        tools_menu.addAction(flip_v_action)
+        
+        tools_menu.addSeparator()
+        
+        reset_transform_action = QAction('Reset Transformations', self)
+        reset_transform_action.setShortcut('Ctrl+R')
+        reset_transform_action.setToolTip('Reset all image transformations')
+        reset_transform_action.triggered.connect(self.reset_transformations)
+        tools_menu.addAction(reset_transform_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu('Help')
+        
+        shortcuts_action = QAction('Keyboard Shortcuts', self)
+        shortcuts_action.setShortcut('F1')
+        shortcuts_action.triggered.connect(self.show_shortcuts_dialog)
+        help_menu.addAction(shortcuts_action)
+        
+        about_action = QAction('About DICOM Viewer', self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
 
     def update_status(self):
         """Update status bar information."""
@@ -851,6 +949,252 @@ class DicomViewer(QMainWindow):
         self.btn_measure.setIcon(create_icon("measure", color=color))
         self.btn_theme.setIcon(create_icon("theme", color=color))
 
+    def load_settings(self):
+        """Load application settings from file."""
+        try:
+            import json
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    self.recent_files = settings.get('recent_files', [])
+                    self.current_theme = settings.get('theme', 'dark')
+        except Exception as e:
+            print(f"Could not load settings: {e}")
+            self.recent_files = []
+
+    def save_settings(self):
+        """Save application settings to file."""
+        try:
+            import json
+            settings = {
+                'recent_files': self.recent_files,
+                'theme': self.current_theme,
+                'window_geometry': {
+                    'x': self.x(),
+                    'y': self.y(),
+                    'width': self.width(),
+                    'height': self.height()
+                }
+            }
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            print(f"Could not save settings: {e}")
+
+    def add_to_recent_files(self, file_path):
+        """Add a file to the recent files list."""
+        # Remove if already exists
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+        
+        # Add to beginning
+        self.recent_files.insert(0, file_path)
+        
+        # Limit to max recent files
+        if len(self.recent_files) > self.max_recent_files:
+            self.recent_files = self.recent_files[:self.max_recent_files]
+        
+        # Update menu
+        self.update_recent_files_menu()
+        
+        # Save settings
+        self.save_settings()
+
+    def update_recent_files_menu(self):
+        """Update the recent files menu."""
+        if hasattr(self, 'recent_files_menu'):
+            self.recent_files_menu.clear()
+            
+            if self.recent_files:
+                for i, file_path in enumerate(self.recent_files):
+                    if i < 9:  # Only show first 9 with numbers
+                        action = QAction(f"&{i+1} {os.path.basename(file_path)}", self)
+                        action.setToolTip(file_path)
+                    else:
+                        action = QAction(os.path.basename(file_path), self)
+                        action.setToolTip(file_path)
+                    
+                    action.triggered.connect(lambda checked, path=file_path: self.open_recent_file(path))
+                    self.recent_files_menu.addAction(action)
+                
+                self.recent_files_menu.addSeparator()
+                clear_action = QAction('Clear Recent Files', self)
+                clear_action.triggered.connect(self.clear_recent_files)
+                self.recent_files_menu.addAction(clear_action)
+            else:
+                no_files_action = QAction('No Recent Files', self)
+                no_files_action.setEnabled(False)
+                self.recent_files_menu.addAction(no_files_action)
+
+    def open_recent_file(self, file_path):
+        """Open a file from the recent files list."""
+        if os.path.exists(file_path):
+            if os.path.isfile(file_path):
+                self.load_dicom_series([file_path])
+            else:
+                # It's a directory
+                files = [os.path.join(file_path, f) for f in os.listdir(file_path)]
+                dicom_files = [f for f in files if f.lower().endswith(('.dcm', '.dicom')) or not '.' in os.path.basename(f)]
+                if dicom_files:
+                    self.load_dicom_series(dicom_files)
+                else:
+                    self.status_bar.showMessage("No DICOM files found in recent folder", 3000)
+        else:
+            self.status_bar.showMessage(f"File not found: {file_path}", 3000)
+            # Remove from recent files
+            if file_path in self.recent_files:
+                self.recent_files.remove(file_path)
+                self.update_recent_files_menu()
+                self.save_settings()
+
+    def rotate_clockwise(self):
+        """Rotate image 90 degrees clockwise."""
+        if not self.slices:
+            return
+        self.rotation_angle = (self.rotation_angle + 90) % 360
+        self.update_image()
+        self.status_bar.showMessage(f"Rotated clockwise - Total rotation: {self.rotation_angle}°", 2000)
+
+    def rotate_counterclockwise(self):
+        """Rotate image 90 degrees counter-clockwise."""
+        if not self.slices:
+            return
+        self.rotation_angle = (self.rotation_angle - 90) % 360
+        self.update_image()
+        self.status_bar.showMessage(f"Rotated counter-clockwise - Total rotation: {self.rotation_angle}°", 2000)
+
+    def flip_horizontal(self):
+        """Flip image horizontally."""
+        if not self.slices:
+            return
+        self.flip_horizontal_state = not self.flip_horizontal_state
+        self.update_image()
+        status = "enabled" if self.flip_horizontal_state else "disabled"
+        self.status_bar.showMessage(f"Horizontal flip {status}", 2000)
+
+    def flip_vertical(self):
+        """Flip image vertically."""
+        if not self.slices:
+            return
+        self.flip_vertical_state = not self.flip_vertical_state
+        self.update_image()
+        status = "enabled" if self.flip_vertical_state else "disabled"
+        self.status_bar.showMessage(f"Vertical flip {status}", 2000)
+
+    def reset_transformations(self):
+        """Reset all image transformations."""
+        if not self.slices:
+            return
+        self.rotation_angle = 0
+        self.flip_horizontal_state = False
+        self.flip_vertical_state = False
+        self.update_image()
+        self.status_bar.showMessage("All transformations reset", 2000)
+
+    def show_shortcuts_dialog(self):
+        """Show keyboard shortcuts dialog."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.setModal(True)
+        dialog.resize(500, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setHtml("""
+        <h2>DICOM Viewer Keyboard Shortcuts</h2>
+        
+        <h3>File Operations</h3>
+        <b>Ctrl+O</b> - Open DICOM file<br>
+        <b>Ctrl+Shift+O</b> - Open DICOM folder<br>
+        <b>Ctrl+E</b> - Export current image<br>
+        <b>Ctrl+Q</b> - Exit application<br>
+        
+        <h3>Navigation</h3>
+        <b>Left/Right Arrow</b> - Previous/Next slice<br>
+        <b>Up/Down Arrow</b> - Previous/Next slice<br>
+        <b>Page Up/Down</b> - Jump 10% of slices<br>
+        <b>Home/End</b> - First/Last slice<br>
+        
+        <h3>Zoom & View</h3>
+        <b>F</b> - Fit image to window<br>
+        <b>Ctrl+1</b> - Actual size (100%)<br>
+        <b>Ctrl++</b> - Zoom in<br>
+        <b>Ctrl+-</b> - Zoom out<br>
+        <b>Escape</b> - Reset zoom to fit<br>
+        
+        <h3>Window/Level</h3>
+        <b>W</b> - Increase width (contrast)<br>
+        <b>Shift+W</b> - Decrease width<br>
+        <b>L</b> - Increase level (brightness)<br>
+        <b>Shift+L</b> - Decrease level<br>
+        
+        <h3>Presets</h3>
+        <b>1</b> - Soft Tissue preset<br>
+        <b>2</b> - Lung preset<br>
+        <b>3</b> - Bone preset<br>
+        
+        <h3>Image Transformation</h3>
+        <b>R</b> - Rotate clockwise<br>
+        <b>Shift+R</b> - Rotate counter-clockwise<br>
+        <b>H</b> - Flip horizontal<br>
+        <b>V</b> - Flip vertical<br>
+        <b>Ctrl+R</b> - Reset all transformations<br>
+        
+        <h3>Tools</h3>
+        <b>M</b> - Measurement tool<br>
+        <b>Ctrl+T</b> - Toggle theme<br>
+        <b>Space</b> - Cine mode (coming soon)<br>
+        
+        <h3>Help</h3>
+        <b>F1</b> - Show this dialog<br>
+        """)
+        
+        layout.addWidget(text_edit)
+        
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        
+        dialog.exec_()
+
+    def show_about_dialog(self):
+        """Show about dialog."""
+        from PyQt5.QtWidgets import QMessageBox
+        
+        QMessageBox.about(self, "About DICOM Viewer", 
+                         """<h2>DICOM Viewer v4.0</h2>
+                         <p><b>Professional Medical Imaging Software</b></p>
+                         
+                         <p>A modern, feature-rich DICOM viewer designed for medical professionals, 
+                         students, and researchers.</p>
+                         
+                         <h3>Features:</h3>
+                         <ul>
+                         <li>Modern glassmorphism UI design</li>
+                         <li>Support for single files and DICOM series</li>
+                         <li>Interactive zoom, pan, and window/level adjustment</li>
+                         <li>Image transformations (rotate, flip)</li>
+                         <li>Multiple window/level presets</li>
+                         <li>Dark and light themes</li>
+                         <li>Comprehensive keyboard shortcuts</li>
+                         <li>Recent files management</li>
+                         <li>Image export functionality</li>
+                         <li>Professional metadata display</li>
+                         </ul>
+                         
+                         <p><b>Dependencies:</b> PyQt5, pydicom, numpy</p>
+                         <p><b>License:</b> Open Source</p>
+                         """)
+
+    def closeEvent(self, event):
+        """Handle application close event."""
+        self.save_settings()
+        event.accept()
+
     def create_separator(self):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -858,13 +1202,73 @@ class DicomViewer(QMainWindow):
         return line
 
     def keyPressEvent(self, event):
-        """Handle keyboard shortcuts for slice navigation."""
-        if not self.slices:
+        """Handle keyboard shortcuts for slice navigation and other functions."""
+        if not self.slices and event.key() not in [Qt.Key_F1]:  # Allow F1 even without slices
             return
-        if event.key() == Qt.Key_Right:
-            self.slice_slider.setValue(self.slice_slider.value() + 1)
-        elif event.key() == Qt.Key_Left:
-            self.slice_slider.setValue(self.slice_slider.value() - 1)
+            
+        # Slice navigation
+        if event.key() == Qt.Key_Right or event.key() == Qt.Key_Down:
+            if self.slice_slider.isEnabled():
+                self.slice_slider.setValue(min(self.slice_slider.maximum(), self.slice_slider.value() + 1))
+        elif event.key() == Qt.Key_Left or event.key() == Qt.Key_Up:
+            if self.slice_slider.isEnabled():
+                self.slice_slider.setValue(max(self.slice_slider.minimum(), self.slice_slider.value() - 1))
+        
+        # Page Up/Down for faster navigation
+        elif event.key() == Qt.Key_PageDown:
+            if self.slice_slider.isEnabled():
+                step = max(1, len(self.slices) // 10)  # Jump by 10% of total slices
+                self.slice_slider.setValue(min(self.slice_slider.maximum(), self.slice_slider.value() + step))
+        elif event.key() == Qt.Key_PageUp:
+            if self.slice_slider.isEnabled():
+                step = max(1, len(self.slices) // 10)
+                self.slice_slider.setValue(max(self.slice_slider.minimum(), self.slice_slider.value() - step))
+        
+        # Home/End for first/last slice
+        elif event.key() == Qt.Key_Home:
+            if self.slice_slider.isEnabled():
+                self.slice_slider.setValue(self.slice_slider.minimum())
+        elif event.key() == Qt.Key_End:
+            if self.slice_slider.isEnabled():
+                self.slice_slider.setValue(self.slice_slider.maximum())
+        
+        # Space bar for play/pause (future cine mode)
+        elif event.key() == Qt.Key_Space:
+            self.status_bar.showMessage("Cine mode - Coming in next update!", 2000)
+        
+        # Window/Level adjustments with keyboard
+        elif event.key() == Qt.Key_W:
+            # Increase width
+            new_value = min(self.width_slider.maximum(), self.width_slider.value() + 10)
+            self.width_slider.setValue(new_value)
+        elif event.key() == Qt.Key_Shift and event.key() == Qt.Key_W:
+            # Decrease width
+            new_value = max(self.width_slider.minimum(), self.width_slider.value() - 10)
+            self.width_slider.setValue(new_value)
+        elif event.key() == Qt.Key_L:
+            # Increase level
+            new_value = min(self.level_slider.maximum(), self.level_slider.value() + 10)
+            self.level_slider.setValue(new_value)
+        elif event.key() == Qt.Key_Shift and event.key() == Qt.Key_L:
+            # Decrease level
+            new_value = max(self.level_slider.minimum(), self.level_slider.value() - 10)
+            self.level_slider.setValue(new_value)
+        
+        # Preset shortcuts
+        elif event.key() == Qt.Key_1:
+            self.apply_preset(PRESETS["Soft Tissue"])
+        elif event.key() == Qt.Key_2:
+            self.apply_preset(PRESETS["Lung"])
+        elif event.key() == Qt.Key_3:
+            self.apply_preset(PRESETS["Bone"])
+        
+        # ESC to reset zoom
+        elif event.key() == Qt.Key_Escape:
+            self.zoom_fit()
+        
+        # Other shortcuts are handled by menu actions
+        else:
+            super().keyPressEvent(event)
 
     # ... (All other methods like open_file, open_folder, load_dicom_series, etc. remain here) ...
     # Note: These methods are largely unchanged from v2, but are included below for completeness.
@@ -873,6 +1277,7 @@ class DicomViewer(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open DICOM File", "", "DICOM Files (*.dcm; *.dicom)")
         if file_path:
             self.load_dicom_series([file_path])
+            self.add_to_recent_files(file_path)
 
     def open_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Open DICOM Folder")
@@ -882,6 +1287,7 @@ class DicomViewer(QMainWindow):
             
             if dicom_files:
                 self.load_dicom_series(dicom_files)
+                self.add_to_recent_files(folder_path)
             else:
                 self.metadata_label.setText("No DICOM files found.")
 
@@ -909,6 +1315,12 @@ class DicomViewer(QMainWindow):
                 print("Warning: Could not sort slices.")
 
         self.current_slice_index = len(self.slices) // 2
+        
+        # Reset transformations when loading new series
+        self.rotation_angle = 0
+        self.flip_horizontal_state = False
+        self.flip_vertical_state = False
+        
         self.setup_sliders()
         self.update_metadata()
         self.update_image()
@@ -1055,7 +1467,23 @@ Slice Position: {self.current_slice_index + 1} / {len(self.slices)}"""
         height, width_px = img_8bit.shape
         q_image = QImage(img_8bit.data, width_px, height, width_px, QImage.Format_Grayscale8)
         
+        # Apply transformations
+        transform = QTransform()
+        
+        # Apply rotation
+        if self.rotation_angle != 0:
+            transform.rotate(self.rotation_angle)
+        
+        # Apply flips
+        if self.flip_horizontal_state:
+            transform.scale(-1, 1)
+        if self.flip_vertical_state:
+            transform.scale(1, -1)
+        
         pixmap = QPixmap.fromImage(q_image)
+        if not transform.isIdentity():
+            pixmap = pixmap.transformed(transform)
+            
         self.pixmap_item.setPixmap(pixmap)
         self.scene.setSceneRect(QRectF(pixmap.rect()))
         
